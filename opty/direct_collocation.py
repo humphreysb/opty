@@ -123,17 +123,21 @@ class Problem(ipopt.problem):
         self.num_free = self.collocator.num_free
         self.num_constraints = self.collocator.num_constraints
 
-        self._generate_bound_arrays()
+        self._generate_bound_arrays()  #Free variable bounds
 
+        self._generate_constraint_bounds() # Constraints on dae
+
+            
         # All constraints are expected to be equal to zero.
-        con_bounds = np.zeros(self.num_constraints)
+        #con_bounds = np.zeros(self.num_constraints)
+    
 
         super(Problem, self).__init__(n=self.num_free,
                                       m=self.num_constraints,
                                       lb=self.lower_bound,
                                       ub=self.upper_bound,
-                                      cl=con_bounds,
-                                      cu=con_bounds)
+                                      cl=self.constraint_bound_low ,
+                                      cu=self.constraint_bound_up )
 
         self.obj_value = []
 
@@ -171,6 +175,30 @@ class Problem(ipopt.problem):
 
         self.lower_bound = lb
         self.upper_bound = ub
+        
+        
+    def _generate_constraint_bounds(self):
+    
+        self.constraint_bound_low = np.zeros(self.num_constraints)
+        self.constraint_bound_up = np.zeros(self.num_constraints)
+            
+        
+        
+        if isinstance(self.collocator.dae_bound_low, np.ndarray):
+            
+            toteq = self.collocator.num_states + self.collocator.num_dae
+            for i in range(self.collocator.num_dae):
+                # idx = np.arange(self.collocator.num_collocation_nodes-1) *toteq + self.collocator.num_states + i    
+                # self.constraint_bound_low[idx] = self.collocator.dae_bound_low[i]
+                # self.constraint_bound_up[idx] = self.collocator.dae_bound_up[i]
+                
+                
+                idx = (self.collocator.num_states+1)*(self.collocator.num_collocation_nodes-1) + np.arange(self.collocator.num_collocation_nodes-1)
+                
+                self.constraint_bound_low[idx] = self.collocator.dae_bound_low[i]
+                self.constraint_bound_up[idx] = self.collocator.dae_bound_up[i]
+    
+    
 
     def objective(self, free):
         """Returns the value of the objective function given a solution to the
@@ -264,6 +292,7 @@ class Problem(ipopt.problem):
         """
         return (self.con_jac_rows, self.con_jac_cols)
 
+
     def jacobian(self, free):
         """Returns the non-zero values of the Jacobian of the constraint
         function.
@@ -339,7 +368,7 @@ class Problem(ipopt.problem):
         return axes
 
     @_optional_plt_dep
-    def plot_constraint_violations(self, vector):
+    def plot_constraint_violations(self, vector, figsize=(10,7)):
         """Returns an axis with the state constraint violations plotted versus
         node number and the instance constraints as a bar graph.
 
@@ -365,27 +394,52 @@ class Problem(ipopt.problem):
         """
 
         con_violations = self.con(vector)
-        con_nodes = range(self.collocator.num_states,
-                          self.collocator.num_collocation_nodes + 1)
-        N = len(con_nodes)
-        fig, axes = plt.subplots(self.collocator.num_states + 1)
+        #con_nodes = range(self.collocator.num_states,
+        #                  self.collocator.num_collocation_nodes + 1)
+        
+        con_nodes = range(1, self.collocator.num_collocation_nodes)       
+        
+        
+        N = self.collocator.num_collocation_nodes - 1
+        
+        num_eom_con = self.collocator.num_states
+        num_dae_con = self.collocator.num_dae
+        
+        #fig, axes = plt.subplots(self.collocator.num_states + 1,1, figsize=figsize)
+        
+        fig, axes = plt.subplots(num_eom_con + num_dae_con + 1 ,1, figsize=figsize)
+ 
+        #for i, (ax, symbol) in enumerate(zip(axes[:-1],
+        #                                     self.collocator.state_symbols)):
+        #    ax.plot(con_nodes, con_violations[i * N:i * N + N])
+        #    ax.set_ylabel(sm.latex(symbol, mode='inline'))
+            
+            
+        for i in range(num_eom_con + num_dae_con):
+            axes[i].plot(con_nodes, con_violations[i * N:i * N + N])
+            if i <= num_eom_con-1:
+                axes[i].set_ylabel('eom'+str(i))   
+            else:
+                axes[i].set_ylabel('dae'+str(i-num_eom_con))   
+            
 
-        for i, (ax, symbol) in enumerate(zip(axes[:-1],
-                                             self.collocator.state_symbols)):
-            ax.plot(con_nodes, con_violations[i * N:i * N + N])
-            ax.set_ylabel(sm.latex(symbol, mode='inline'))
+
 
         axes[0].set_title('Constraint Violations')
+        
+        
+        con_violations[(num_eom_con + num_dae_con)*N:]
+        
+        
         axes[-2].set_xlabel('Node Number')
 
-        left = range(len(con_violations[self.collocator.num_states * N:]))
-        axes[-1].bar(left, con_violations[self.collocator.num_states * N:],
-                     tick_label=[sm.latex(s, mode='inline')
-                                 for s in self.collocator.instance_constraints])
-        axes[-1].set_ylabel('Instance')
-        axes[-1].set_xticklabels(axes[-1].get_xticklabels(), rotation=-10)
+        left = range(len(con_violations[(num_eom_con + num_dae_con)*N:]))
+        axes[-1].bar(left, con_violations[(num_eom_con + num_dae_con)*N:])
 
-        return axes
+        axes[-1].set_ylabel('Instance')
+        #axes[-1].set_xticklabels(axes[-1].get_xticklabels(), rotation=-10)
+
+        return fig
 
     @_optional_plt_dep
     def plot_objective_value(self):
@@ -424,11 +478,12 @@ class ConstraintCollocator(object):
 
     time_interval_symbol = sm.Symbol('h', real=True)
 
-    def __init__(self, equations_of_motion, state_symbols,
+    def __init__(self, equations_of_motion, equations_dae, state_symbols,
                  num_collocation_nodes, node_time_interval,
                  known_parameter_map={}, known_trajectory_map={},
                  instance_constraints=None, time_symbol=None, tmp_dir=None,
-                 integration_method='backward euler', parallel=False):
+                 integration_method='backward euler', 
+                 dae_bound_low = None, dae_bound_up=None, parallel=False):
         """Instantiates a ConstraintCollocator object.
 
         Parameters
@@ -485,6 +540,12 @@ class ConstraintCollocator(object):
 
         """
         self.eom = equations_of_motion
+        
+        self.dae = equations_dae
+        if bool(self.dae):
+            self.num_dae = equations_dae.shape[0]
+        else:
+            self.num_dae = 0
 
         if time_symbol is not None:
             self.time_symbol = time_symbol
@@ -504,7 +565,8 @@ class ConstraintCollocator(object):
 
         self.instance_constraints = instance_constraints
 
-        self.num_constraints = self.num_states * (num_collocation_nodes - 1)
+        self.num_constraints = (self.num_states + self.num_dae ) * \
+            (num_collocation_nodes - 1) 
 
         self.tmp_dir = tmp_dir
         self.parallel = parallel
@@ -515,7 +577,8 @@ class ConstraintCollocator(object):
         self.num_free = ((self.num_states +
                           self.num_unknown_input_trajectories) *
                          self.num_collocation_nodes +
-                         self.num_unknown_parameters)
+                         self.num_unknown_parameters)  
+
 
         self.integration_method = integration_method
 
@@ -529,6 +592,11 @@ class ConstraintCollocator(object):
             self.eval_instance_constraints_jacobian_values = \
                 self._instance_constraints_jacobian_values_func()
 
+
+        self.dae_bound_low = dae_bound_low 
+        self.dae_bound_up = dae_bound_up 
+        
+        
     @property
     def integration_method(self):
         return self._integration_method
@@ -607,7 +675,13 @@ class ConstraintCollocator(object):
         and categorizes them based on which parameters the user supplies.
         The unknown parameters are sorted by name."""
 
-        parameters = self.eom.free_symbols.copy()
+        
+        eomParams = self.eom.free_symbols.copy() 
+        daeParams = self.dae.free_symbols.copy()
+        parameters = eomParams.union(daeParams)
+
+        #parameters = self.eom.free_symbols.copy()
+        
         parameters.remove(self.time_symbol)
 
         res = self._parse_inputs(parameters,
@@ -641,7 +715,14 @@ class ConstraintCollocator(object):
         states = set(self.state_symbols)
         states_derivatives = set(self.state_derivative_symbols)
 
-        time_varying_symbols = me.find_dynamicsymbols(self.eom)
+        
+
+        #time_varying_symbols = me.find_dynamicsymbols(self.eom)
+        
+        time_varying_symbols_eom = me.find_dynamicsymbols(self.eom)  
+        time_varying_symbols_dae = me.find_dynamicsymbols(self.dae)  
+        time_varying_symbols = time_varying_symbols_eom.union(time_varying_symbols_dae ) 
+        
         state_related = states.union(states_derivatives)
         non_states = time_varying_symbols.difference(state_related)
 
@@ -751,6 +832,10 @@ class ConstraintCollocator(object):
             func_sub = dict(zip(x + u, xi + ui))
 
             self.discrete_eom = me.msubs(self.eom, deriv_sub, func_sub)
+            if self.dae:
+                self.discrete_dae = me.msubs(self.dae, deriv_sub, func_sub)
+            else:
+                self.discrete_dae = False
 
         elif self.integration_method == 'midpoint':
 
@@ -784,6 +869,7 @@ class ConstraintCollocator(object):
 
         time_vector = np.linspace(0.0, duration, num=N)
 
+        #toss_an_errorHere #instance constraints not verified
         node_map = {}
         for func in self.instance_constraint_function_atoms:
             time_value = func.args[0]
@@ -813,7 +899,10 @@ class ConstraintCollocator(object):
         Jacobian of the constraints."""
         idx_map = self.instance_constraints_free_index_map
 
-        num_eom_constraints = self.num_states*(self.num_collocation_nodes - 1)
+        #num_eom_constraints = self.num_states*(self.num_collocation_nodes - 1)
+        
+        num_eom_constraints = (self.num_states+self.num_dae) * (self.num_collocation_nodes - 1) 
+
 
         rows = []
         cols = []
@@ -897,18 +986,30 @@ class ConstraintCollocator(object):
         xn_syms = self.next_discrete_state_symbols
         si_syms = self.current_discrete_specified_symbols
         sn_syms = self.next_discrete_specified_symbols
+        si_syms = self.current_discrete_specified_symbols
+        sn_syms = self.next_discrete_specified_symbols
         h_sym = self.time_interval_symbol
         constant_syms = self.known_parameters + self.unknown_parameters
+        #See note below on why constant sysms are both known and unknown constants
+        
+        
+        
 
         if self.integration_method == 'backward euler':
 
             args = [x for x in xi_syms] + [x for x in xp_syms]
-            args += [s for s in si_syms] + list(constant_syms) + [h_sym]
+            args += [s for s in si_syms] + list(constant_syms) + [h_sym]  
 
             current_start = 1
             current_stop = None
             adjacent_start = None
             adjacent_stop = -1
+            
+            if bool(self.discrete_dae):
+                discrete_eom = sm.Matrix(np.vstack([self.discrete_eom, self.discrete_dae]))
+            else:
+                discrete_eom = sm.Matrix([self.discrete_eom])
+
 
         elif self.integration_method == 'midpoint':
 
@@ -920,8 +1021,14 @@ class ConstraintCollocator(object):
             current_stop = -1
             adjacent_start = 1
             adjacent_stop = None
-
-        f = ufuncify_matrix(args, self.discrete_eom,
+            
+            
+            
+        # Note args needs to contain all variables, whether constant or not.
+        # the const argument does not refer to if the variable is constant (not
+        # changing over the optimization.  Const refers to if the variable's
+        # value stays constnat over the looping to create the constraint matrix. 
+        f = ufuncify_matrix(args, discrete_eom,
                             const=constant_syms + (h_sym,),
                             tmp_dir=self.tmp_dir, parallel=self.parallel)
 
@@ -987,10 +1094,17 @@ class ConstraintCollocator(object):
 
             num_constraints = state_values.shape[1] - 1
 
+            #num_constraints = state_values.shape[1] - 1 + self.num_dae
+            
+            num_constraint_equation = state_values.shape[0] + self.num_dae
+
             # TODO : Move this to an attribute of the class so that it is
             # only initialized once and just reuse it on each evaluation of
             # this function.
-            result = np.empty((num_constraints, state_values.shape[0]))
+            
+            #result = np.empty((num_constraints, state_values.shape[0]))
+            result = np.empty((num_constraints, num_constraint_equation))
+
 
             return f(result, *args).T.flatten()
 
@@ -1009,19 +1123,19 @@ class ConstraintCollocator(object):
 
         """
 
+
         N = self.num_collocation_nodes
         n = self.num_states
 
         num_constraint_nodes = N - 1
 
         if self.integration_method == 'backward euler':
-
-            num_partials = n * (2 * n + self.num_unknown_input_trajectories +
-                                self.num_unknown_parameters)
+            
+            num_partials = (n+self.num_dae) * (2 * n + self.num_unknown_input_trajectories + self.num_unknown_parameters)
 
         elif self.integration_method == 'midpoint':
 
-            num_partials = n * (2 * n + 2 *
+            num_partials = (n+self.num_dae) * (2 * n +  
                                 self.num_unknown_input_trajectories +
                                 self.num_unknown_parameters)
 
@@ -1160,7 +1274,7 @@ class ConstraintCollocator(object):
             # This gives the Jacobian row indices matching the ith
             # constraint node for each state. ith corresponds to the loop
             # indice.
-            row_idxs = [j * (num_constraint_nodes) + i for j in range(n)]
+            row_idxs = [j * (num_constraint_nodes) + i for j in range(n+self.num_dae)]  
 
             # first row, the columns indices mapping is:
             # [1, N + 1, ..., N - 1] : [x1p, x1i, 0, ..., 0]
@@ -1226,6 +1340,8 @@ class ConstraintCollocator(object):
         un_syms = self.next_unknown_discrete_specified_symbols
         h_sym = self.time_interval_symbol
         constant_syms = self.known_parameters + self.unknown_parameters
+        unknown_constant_syms = self.unknown_parameters 
+        #known_constant_syms = self.known_parameters 
 
         if self.integration_method == 'backward euler':
 
@@ -1233,7 +1349,7 @@ class ConstraintCollocator(object):
             # the unknown input trajectories, and the unknown model
             # constants, so the base Jacobian needs to be taken with respect
             # to the ith, and ith - 1 states, and the free model constants.
-            wrt = (xi_syms + xp_syms + ui_syms + self.unknown_parameters)
+            wrt = (xi_syms + xp_syms + ui_syms + unknown_constant_syms)
 
             # The arguments to the Jacobian function include all of the free
             # Symbols/Functions in the matrix expression.
@@ -1258,10 +1374,16 @@ class ConstraintCollocator(object):
             current_stop = -1
             adjacent_start = 1
             adjacent_stop = None
+            
+            
+        if bool(self.discrete_dae):
+            discrete_eom = sm.Matrix(np.vstack([self.discrete_eom,self.discrete_dae]))
+        else:
+            discrete_eom = sm.Matrix([self.discrete_eom])    
 
         # This creates a matrix with all of the symbolic partial derivatives
         # necessary to compute the full Jacobian.
-        symbolic_partials = self.discrete_eom.jacobian(wrt)
+        symbolic_partials = discrete_eom.jacobian(wrt)
 
         # This generates a numerical function that evaluates the matrix of
         # partial derivatives. This function returns the non-zero elements
